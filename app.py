@@ -23,12 +23,6 @@ from dotenv import load_dotenv
 import openai
 import httpx
 import json
-<<<<<<< HEAD
-=======
-from werkzeug.security import generate_password_hash, check_password_hash
-from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
->>>>>>> 2d3fa3e96fd878444154e0a4a40784a44008fd8e
 
 # 환경변수 로드
 load_dotenv()
@@ -652,7 +646,6 @@ def generate_interpretation(object_type, feature_name, feature_value, criteria_t
     
     return interpretation if interpretation["interpretation"] else None
 
-<<<<<<< HEAD
 def is_counseling_related(title, category, description):
     """상담센터 관련 키워드인지 판별"""
     
@@ -695,8 +688,6 @@ def is_counseling_related(title, category, description):
     
     return False
 
-=======
->>>>>>> 2d3fa3e96fd878444154e0a4a40784a44008fd8e
 def allowed_file(filename):
     """파일 확장자 검증"""
     return '.' in filename and \
@@ -1139,57 +1130,6 @@ def reverse_geocode():
     except Exception as e:
         return jsonify({"error": f"서버 오류: {str(e)}"}), 500
 
-<<<<<<< HEAD
-=======
-@app.route('/api/register', methods=['POST'])
-def register():
-    """사용자 회원가입 API"""
-    try:
-        data = request.get_json()
-        username = data.get('username')
-        password = data.get('password')
-
-        if not username or not password:
-            return jsonify({"error": "사용자 이름과 비밀번호가 필요합니다."}), 400
-
-        if User.query.filter_by(username=username).first():
-            return jsonify({"error": "이미 존재하는 사용자 이름입니다."}), 409
-
-        hashed_password = generate_password_hash(password)
-        new_user = User(username=username, password_hash=hashed_password)
-        db.session.add(new_user)
-        db.session.commit()
-
-        return jsonify({"success": True, "message": "회원가입이 성공적으로 완료되었습니다."}), 201
-
-    except Exception as e:
-        db.session.rollback()
-        print(f"회원가입 API 오류: {e}")
-        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
-
-@app.route('/api/login', methods=['POST'])
-def login():
-    """사용자 로그인 API"""
-    try:
-        data = request.get_json()
-        username = data.get('username')
-        password = data.get('password')
-
-        if not username or not password:
-            return jsonify({"error": "사용자 이름과 비밀번호가 필요합니다."}), 400
-
-        user = User.query.filter_by(username=username).first()
-
-        if user and check_password_hash(user.password_hash, password):
-            return jsonify({"success": True, "message": "로그인이 성공적으로 완료되었습니다.", "username": username}), 200
-        else:
-            return jsonify({"error": "잘못된 사용자 이름 또는 비밀번호입니다."}), 401
-
-    except Exception as e:
-        print(f"로그인 API 오류: {e}")
-        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
-
->>>>>>> 2d3fa3e96fd878444154e0a4a40784a44008fd8e
 if __name__ == '__main__':
     print("=" * 60)
     print("MindCanvas Backend 서버를 시작합니다...")
