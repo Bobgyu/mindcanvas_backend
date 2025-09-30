@@ -12,7 +12,7 @@ import io
 import cv2
 import numpy as np
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin # cross_origin 임포트 추가
 from werkzeug.utils import secure_filename
 import torch
 from PIL import Image
@@ -23,6 +23,11 @@ from dotenv import load_dotenv
 import openai
 import httpx
 import json
+import uuid # 그림 파일명 생성을 위해 추가
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+import traceback # traceback 모듈 임포트
 
 # 환경변수 로드
 load_dotenv()
@@ -37,10 +42,11 @@ NAVER_SEARCH_CLIENT_ID = os.getenv('NAVER_SEARCH_CLIENT_ID')
 NAVER_SEARCH_CLIENT_SECRET = os.getenv('NAVER_SEARCH_CLIENT_SECRET')
 
 app = Flask(__name__)
-CORS(app)  # CORS 활성화
+
+CORS(app)
 
 # PostgreSQL 설정
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'postgresql://your_user:your_password@localhost:5432/your_database')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'postgresql://your_user:your_password@localhost:5432/your_database') + '?client_encoding=UTF8'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # 기존 설정 다시 추가
@@ -59,6 +65,20 @@ class User(db.Model):
 
     def __repr__(self):
         return f'<User {self.username}>'
+
+# 그림 모델 정의
+class Drawing(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    image_path = db.Column(db.String(256), nullable=False)
+    analysis_result = db.Column(db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime, default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+
+    user = db.relationship('User', backref=db.backref('drawings', lazy=True))
+
+    def __repr__(self):
+        return f'<Drawing {self.id} by User {self.user_id}>'
 
 # 업로드 및 출력 폴더 생성
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -1128,6 +1148,173 @@ def reverse_geocode():
     except httpx.RequestError as e:
         return jsonify({"error": f"API 요청 오류: {str(e)}"}), 500
     except Exception as e:
+        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
+
+@app.route('/api/drawings', methods=['POST'])
+def save_drawing():
+    """사용자의 그림과 분석 결과를 저장하는 API"""
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id') # 실제 구현에서는 JWT 등 인증 토큰에서 user_id를 가져와야 함
+        image_data = data.get('image') # Base64 이미지 데이터
+        analysis_result = data.get('analysis_result')
+
+        if not user_id or not image_data:
+            return jsonify({"error": "사용자 ID와 이미지 데이터가 필요합니다."}), 400
+
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"error": "유효하지 않은 사용자 ID입니다."}), 404
+
+        # Base64 이미지 데이터를 파일로 저장
+        image = base64_to_image(image_data)
+        if image is None:
+            return jsonify({"error": "이미지 변환에 실패했습니다."}), 400
+
+        # 고유한 파일명 생성
+        filename = f"{uuid.uuid4().hex}.png"
+        image_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        image.save(image_path)
+
+        new_drawing = Drawing(
+            user_id=user_id,
+            image_path=image_path,
+            analysis_result=analysis_result
+        )
+        db.session.add(new_drawing)
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "그림과 분석 결과가 성공적으로 저장되었습니다.",
+            "drawing_id": new_drawing.id
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"그림 저장 API 오류: {e}")
+        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
+
+@app.route('/api/drawings/<int:user_id>', methods=['GET'])
+def get_user_drawings(user_id):
+    """특정 사용자의 그림 및 분석 결과를 가져오는 API"""
+    try:
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"error": "유효하지 않은 사용자 ID입니다."}), 404
+
+        drawings = Drawing.query.filter_by(user_id=user_id).order_by(Drawing.created_at.desc()).all()
+        
+        drawings_data = []
+        for drawing in drawings:
+            # 이미지 파일을 Base64로 다시 인코딩
+            with open(drawing.image_path, "rb") as image_file:
+                encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
+
+            drawings_data.append({
+                "id": drawing.id,
+                "image": f"data:image/png;base64,{encoded_image}",
+                "analysis_result": drawing.analysis_result,
+                "created_at": drawing.created_at.isoformat(),
+                "updated_at": drawing.updated_at.isoformat()
+            })
+
+        return jsonify({
+            "success": True,
+            "user_id": user_id,
+            "drawings": drawings_data,
+            "message": "사용자의 그림 목록을 성공적으로 가져왔습니다."
+        }), 200
+
+    except Exception as e:
+        print(f"그림 조회 API 오류: {e}")
+        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
+
+@app.route('/api/register', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def register():
+    """사용자 회원가입 API"""
+    try:
+        raw_data = request.get_data()
+        # Debugging: print raw incoming data for analysis
+        print(f"회원가입 API - Raw incoming data (bytes): {raw_data}")
+
+        try:
+            data_str = raw_data.decode('utf-8')
+            data = json.loads(data_str)
+            print(f"회원가입 API - Parsed JSON data: {data}")
+        except UnicodeDecodeError as e:
+            print(f"회원가입 API - UTF-8 디코딩 오류: {e}")
+            return jsonify({"error": f"서버 오류: 데이터 디코딩 오류 - {str(e)}"}), 400
+        except json.JSONDecodeError as e:
+            print(f"회원가입 API - JSON 파싱 오류: {e}")
+            return jsonify({"error": f"서버 오류: 유효한 JSON 형식이 아닙니다 - {str(e)}"}), 400
+        except Exception as e:
+            print(f"회원가입 API - 알 수 없는 데이터 처리 오류: {e}")
+            return jsonify({"error": f"서버 오류: 알 수 없는 데이터 처리 오류 - {str(e)}"}), 500
+
+        username = data.get('username')
+        password = data.get('password')
+        email = data.get('email')
+
+        if not username or not password:
+            return jsonify({"error": "사용자 이름과 비밀번호가 필요합니다."}), 400
+
+        if User.query.filter_by(username=username).first():
+            return jsonify({"error": "이미 존재하는 사용자 이름입니다."}), 409
+
+        hashed_password = generate_password_hash(password)
+        new_user = User(username=username, password_hash=hashed_password, email=email)
+        db.session.add(new_user)
+        db.session.commit()
+
+        return jsonify({"success": True, "message": "회원가입이 성공적으로 완료되었습니다."}), 201
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"회원가입 API 오류 (최상위 예외): {e}") # Added for debugging
+        print("회원가입 API - 전체 트레이스백:\n" + traceback.format_exc())
+        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
+
+@app.route('/api/login', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def login():
+    """사용자 로그인 API"""
+    try:
+        raw_data = request.get_data()
+        # Debugging: print raw incoming data for analysis
+        print(f"로그인 API - Raw incoming data (bytes): {raw_data}")
+
+        try:
+            data_str = raw_data.decode('utf-8')
+            data = json.loads(data_str)
+            print(f"로그인 API - Parsed JSON data: {data}")
+        except UnicodeDecodeError as e:
+            print(f"로그인 API - UTF-8 디코딩 오류: {e}")
+            return jsonify({"error": f"서버 오류: 데이터 디코딩 오류 - {str(e)}"}), 400
+        except json.JSONDecodeError as e:
+            print(f"로그인 API - JSON 파싱 오류: {e}")
+            return jsonify({"error": f"서버 오류: 유효한 JSON 형식이 아닙니다 - {str(e)}"}), 400
+        except Exception as e:
+            print(f"로그인 API - 알 수 없는 데이터 처리 오류: {e}")
+            return jsonify({"error": f"서버 오류: 알 수 없는 데이터 처리 오류 - {str(e)}"}), 500
+
+        username = data.get('username')
+        password = data.get('password')
+
+        if not username or not password:
+            return jsonify({"error": "사용자 이름과 비밀번호가 필요합니다."}), 400
+
+        user = User.query.filter_by(username=username).first()
+
+        if user and check_password_hash(user.password_hash, password):
+            return jsonify({"success": True, "message": "로그인이 성공적으로 완료되었습니다.", "username": username}), 200
+        else:
+            return jsonify({"error": "잘못된 사용자 이름 또는 비밀번호입니다."}), 401
+
+    except Exception as e:
+        print(f"로그인 API 오류 (최상위 예외): {e}") # Added for debugging
+        print("로그인 API - 전체 트레이스백:\n" + traceback.format_exc())
         return jsonify({"error": f"서버 오류: {str(e)}"}), 500
 
 if __name__ == '__main__':
