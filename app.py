@@ -23,6 +23,9 @@ from dotenv import load_dotenv
 import openai
 import httpx
 import json
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
 
 # 환경변수 로드
 load_dotenv()
@@ -39,9 +42,26 @@ NAVER_SEARCH_CLIENT_SECRET = os.getenv('NAVER_SEARCH_CLIENT_SECRET')
 app = Flask(__name__)
 CORS(app)  # CORS 활성화
 
+# PostgreSQL 설정
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'postgresql://your_user:your_password@localhost:5432/your_database')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# 기존 설정 다시 추가
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB 최대 파일 크기
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['OUTPUT_FOLDER'] = 'outputs'
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+
+# 사용자 모델 정의
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password_hash = db.Column(db.String(256), nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=True)
+
+    def __repr__(self):
+        return f'<User {self.username}>'
 
 # 업로드 및 출력 폴더 생성
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -629,48 +649,6 @@ def generate_interpretation(object_type, feature_name, feature_value, criteria_t
     
     return interpretation if interpretation["interpretation"] else None
 
-def is_counseling_related(title, category, description):
-    """상담센터 관련 키워드인지 판별"""
-    
-    # 상담센터 관련 키워드 (포함되어야 함)
-    counseling_keywords = [
-        '상담', '심리', '정신', '치료', '클리닉', '센터', '의원', '병원',
-        '마음', '정신건강', '심리상담', '심리치료', '정신과', '정신건강복지',
-        '상담센터', '심리상담센터', '심리치료센터', '정신건강복지센터',
-        '심리클리닉', '마음상담센터', '정신과의원', '정신건강의학과',
-        '우울', '불안', '스트레스', '트라우마', '가족상담', '부부상담',
-        '청소년상담', '아동상담', '노인상담', '집단상담', '개인상담'
-    ]
-    
-    # 제외할 키워드 (포함되면 안됨)
-    exclude_keywords = [
-        '카페', '커피', '음식점', '식당', '레스토랑', '패스트푸드',
-        '가죽', '공방', '수제', '핸드메이드', '공예', '만들기',
-        '미용', '헤어', '네일', '피부', '마사지', '스파',
-        '헬스', '피트니스', '요가', '필라테스', '운동',
-        '학원', '교육', '학습', '과외', '입시', '어학',
-        '쇼핑', '마트', '편의점', '백화점', '상점',
-        '호텔', '펜션', '모텔', '숙박', '여행',
-        '은행', '보험', '금융', '증권', '대출',
-        '자동차', '정비', '수리', '세차', '주유',
-        '부동산', '중개', '임대', '매매', '분양'
-    ]
-    
-    # 모든 텍스트를 소문자로 변환하여 검색
-    text_to_check = f"{title} {category} {description}".lower()
-    
-    # 제외 키워드가 포함되어 있으면 False
-    for exclude_keyword in exclude_keywords:
-        if exclude_keyword in text_to_check:
-            return False
-    
-    # 상담센터 관련 키워드가 하나라도 포함되어 있으면 True
-    for counseling_keyword in counseling_keywords:
-        if counseling_keyword in text_to_check:
-            return True
-    
-    return False
-
 def allowed_file(filename):
     """파일 확장자 검증"""
     return '.' in filename and \
@@ -933,29 +911,18 @@ def search_places():
             
             data = response.json()
             
-            # 검색 결과 파싱 및 필터링
+            # 검색 결과 파싱
             if data.get("items"):
                 results = []
                 for item in data["items"]:
-                    title = item.get("title", "").replace("<b>", "").replace("</b>", "")
-                    category = item.get("category", "")
-                    description = item.get("description", "").replace("<b>", "").replace("</b>", "")
-                    
-                    # 상담센터 관련 키워드 필터링 (일시적으로 비활성화)
-                    print(f"🔍 검색 결과: {title} | 카테고리: {category} | 설명: {description}")
-                    is_related = is_counseling_related(title, category, description)
-                    print(f"🔍 필터링 결과: {is_related}")
-                    
-                    # 일시적으로 모든 결과를 포함 (디버깅용)
                     results.append({
-                        "title": title,
+                        "title": item.get("title", "").replace("<b>", "").replace("</b>", ""),
                         "address": item.get("address", ""),
                         "roadAddress": item.get("roadAddress", ""),
-                        "category": category,
-                        "description": description,
+                        "category": item.get("category", ""),
+                        "description": item.get("description", "").replace("<b>", "").replace("</b>", ""),
                         "link": item.get("link", ""),
-                        "telephone": item.get("telephone", ""),
-                        "is_counseling_related": is_related  # 디버깅용 필드 추가
+                        "telephone": item.get("telephone", "")
                     })
                 
                 return jsonify({
@@ -1111,6 +1078,54 @@ def reverse_geocode():
     except httpx.RequestError as e:
         return jsonify({"error": f"API 요청 오류: {str(e)}"}), 500
     except Exception as e:
+        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    """사용자 회원가입 API"""
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        password = data.get('password')
+
+        if not username or not password:
+            return jsonify({"error": "사용자 이름과 비밀번호가 필요합니다."}), 400
+
+        if User.query.filter_by(username=username).first():
+            return jsonify({"error": "이미 존재하는 사용자 이름입니다."}), 409
+
+        hashed_password = generate_password_hash(password)
+        new_user = User(username=username, password_hash=hashed_password)
+        db.session.add(new_user)
+        db.session.commit()
+
+        return jsonify({"success": True, "message": "회원가입이 성공적으로 완료되었습니다."}), 201
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"회원가입 API 오류: {e}")
+        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    """사용자 로그인 API"""
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        password = data.get('password')
+
+        if not username or not password:
+            return jsonify({"error": "사용자 이름과 비밀번호가 필요합니다."}), 400
+
+        user = User.query.filter_by(username=username).first()
+
+        if user and check_password_hash(user.password_hash, password):
+            return jsonify({"success": True, "message": "로그인이 성공적으로 완료되었습니다.", "username": username}), 200
+        else:
+            return jsonify({"error": "잘못된 사용자 이름 또는 비밀번호입니다."}), 401
+
+    except Exception as e:
+        print(f"로그인 API 오류: {e}")
         return jsonify({"error": f"서버 오류: {str(e)}"}), 500
 
 if __name__ == '__main__':
