@@ -28,6 +28,9 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 import traceback # traceback 모듈 임포트
+import jwt
+from datetime import datetime, timedelta
+from functools import wraps
 
 # 환경변수 로드
 load_dotenv()
@@ -53,18 +56,71 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB 최대 파일 크기
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['OUTPUT_FOLDER'] = 'outputs'
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-change-this-in-production')
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key-change-this-in-production')
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=30)  # 30일간 유효
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 
 # 사용자 모델 정의
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
+    username = db.Column(db.String(80), nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=True)
 
     def __repr__(self):
         return f'<User {self.username}>'
+
+# JWT 토큰 관련 함수들
+def generate_jwt_token(user_id, username):
+    """JWT 토큰 생성"""
+    payload = {
+        'user_id': user_id,
+        'username': username,
+        'exp': datetime.utcnow() + app.config['JWT_ACCESS_TOKEN_EXPIRES'],
+        'iat': datetime.utcnow()
+    }
+    token = jwt.encode(payload, app.config['JWT_SECRET_KEY'], algorithm='HS256')
+    return token
+
+def verify_jwt_token(token):
+    """JWT 토큰 검증"""
+    try:
+        payload = jwt.decode(token, app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+def token_required(f):
+    """토큰 검증 데코레이터"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            try:
+                token = auth_header.split(" ")[1]  # "Bearer <token>" 형식에서 토큰 추출
+            except IndexError:
+                return jsonify({"error": "토큰 형식이 올바르지 않습니다."}), 401
+        
+        if not token:
+            return jsonify({"error": "토큰이 필요합니다."}), 401
+        
+        try:
+            payload = verify_jwt_token(token)
+            if payload is None:
+                return jsonify({"error": "유효하지 않은 토큰입니다."}), 401
+            
+            # request 객체에 사용자 정보 추가
+            request.current_user = payload
+        except Exception as e:
+            return jsonify({"error": f"토큰 검증 오류: {str(e)}"}), 401
+        
+        return f(*args, **kwargs)
+    return decorated
 
 # 그림 모델 정의
 class Drawing(db.Model):
@@ -1272,9 +1328,6 @@ def register():
         if not username or not password:
             return jsonify({"error": "사용자 이름과 비밀번호가 필요합니다."}), 400
 
-        if User.query.filter_by(username=username).first():
-            return jsonify({"error": "이미 존재하는 사용자 이름입니다."}), 409
-
         hashed_password = generate_password_hash(password)
         new_user = User(username=username, password_hash=hashed_password, email=email)
         db.session.add(new_user)
@@ -1320,13 +1373,53 @@ def login():
         user = User.query.filter_by(username=username).first()
 
         if user and check_password_hash(user.password_hash, password):
-            return jsonify({"success": True, "message": "로그인이 성공적으로 완료되었습니다.", "username": username}), 200
+            # JWT 토큰 생성
+            token = generate_jwt_token(user.id, username)
+            return jsonify({
+                "success": True, 
+                "message": "로그인이 성공적으로 완료되었습니다.", 
+                "username": username,
+                "user_id": user.id,
+                "token": token
+            }), 200
         else:
             return jsonify({"error": "잘못된 사용자 이름 또는 비밀번호입니다."}), 401
 
     except Exception as e:
         print(f"로그인 API 오류 (최상위 예외): {e}") # Added for debugging
         print("로그인 API - 전체 트레이스백:\n" + traceback.format_exc())
+        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
+
+@app.route('/api/logout', methods=['POST', 'OPTIONS'])
+@cross_origin()
+@token_required
+def logout():
+    """사용자 로그아웃 API"""
+    try:
+        # JWT 토큰은 클라이언트에서 삭제하면 됩니다 (서버 측에서는 무효화할 필요 없음)
+        return jsonify({
+            "success": True, 
+            "message": "로그아웃이 성공적으로 완료되었습니다."
+        }), 200
+    except Exception as e:
+        print(f"로그아웃 API 오류: {e}")
+        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
+
+@app.route('/api/verify-token', methods=['POST', 'OPTIONS'])
+@cross_origin()
+@token_required
+def verify_token():
+    """토큰 검증 API"""
+    try:
+        user_info = request.current_user
+        return jsonify({
+            "success": True,
+            "message": "토큰이 유효합니다.",
+            "user_id": user_info['user_id'],
+            "username": user_info['username']
+        }), 200
+    except Exception as e:
+        print(f"토큰 검증 API 오류: {e}")
         return jsonify({"error": f"서버 오류: {str(e)}"}), 500
 
 if __name__ == '__main__':
