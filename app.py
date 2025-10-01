@@ -71,7 +71,7 @@ class Drawing(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     image_path = db.Column(db.String(256), nullable=False)
-    analysis_result = db.Column(db.JSON, nullable=True)
+    analysis_result = db.Column(db.JSON, nullable=True) # JSON 타입으로 분석 결과 저장
     created_at = db.Column(db.DateTime, default=db.func.current_timestamp())
     updated_at = db.Column(db.DateTime, default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
 
@@ -1159,17 +1159,29 @@ def save_drawing():
         image_data = data.get('image') # Base64 이미지 데이터
         analysis_result = data.get('analysis_result')
 
-        if not user_id or not image_data:
-            return jsonify({"error": "사용자 ID와 이미지 데이터가 필요합니다."}), 400
+        # 디버깅: 수신된 데이터 로깅
+        print(f"[save_drawing] 수신 user_id: {user_id}")
+        print(f"[save_drawing] image_data 길이: {len(image_data) if image_data else 'None'}")
+        print(f"[save_drawing] analysis_result 존재 여부: {analysis_result is not None}")
+
+        if not user_id:
+            return jsonify({"error": "사용자 ID가 필요합니다."}), 400
+        if not image_data:
+            return jsonify({"error": "이미지 데이터가 필요합니다."}), 400
+
+        try:
+            user_id = int(user_id)
+        except ValueError:
+            return jsonify({"error": "유효하지 않은 사용자 ID 형식입니다. 숫자를 기대합니다."}), 400
 
         user = User.query.get(user_id)
         if not user:
-            return jsonify({"error": "유효하지 않은 사용자 ID입니다."}), 404
+            return jsonify({"error": f"사용자 ID {user_id}에 해당하는 사용자를 찾을 수 없습니다."}), 404
 
         # Base64 이미지 데이터를 파일로 저장
         image = base64_to_image(image_data)
         if image is None:
-            return jsonify({"error": "이미지 변환에 실패했습니다."}), 400
+            return jsonify({"error": "이미지 변환에 실패했습니다. 유효한 Base64 이미지 데이터를 제공해주세요."}), 400
 
         # 고유한 파일명 생성
         filename = f"{uuid.uuid4().hex}.png"
@@ -1268,7 +1280,7 @@ def register():
         db.session.add(new_user)
         db.session.commit()
 
-        return jsonify({"success": True, "message": "회원가입이 성공적으로 완료되었습니다."}), 201
+        return jsonify({"success": True, "message": "회원가입이 성공적으로 완료되었습니다.", "user_id": new_user.id}), 201
 
     except Exception as e:
         db.session.rollback()
